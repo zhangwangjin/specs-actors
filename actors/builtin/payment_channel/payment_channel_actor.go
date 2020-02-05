@@ -2,12 +2,13 @@ package payment_channel
 
 import (
 	"bytes"
-	"io"
 
 	addr "github.com/filecoin-project/go-address"
+
 	abi "github.com/filecoin-project/specs-actors/actors/abi"
 	big "github.com/filecoin-project/specs-actors/actors/abi/big"
 	"github.com/filecoin-project/specs-actors/actors/builtin"
+	acrypto "github.com/filecoin-project/specs-actors/actors/crypto"
 	vmr "github.com/filecoin-project/specs-actors/actors/runtime"
 	"github.com/filecoin-project/specs-actors/actors/runtime/exitcode"
 	indices "github.com/filecoin-project/specs-actors/actors/runtime/indices"
@@ -16,33 +17,34 @@ import (
 
 type PaymentChannelActor struct{}
 
-/////////////////
-// Constructor //
-/////////////////
-
-type PCAConstructorParams struct {
+type ConstructorParams struct {
 	To addr.Address
 }
 
-func (pca *PaymentChannelActor) Constructor(rt vmr.Runtime, params *PCAConstructorParams) *adt.EmptyValue {
+func (pca *PaymentChannelActor) Constructor(rt vmr.Runtime, params *ConstructorParams) *adt.EmptyValue {
+	rt.ValidateImmediateCallerType(builtin.AccountActorCodeID)
 
-	// TODO anorth: ensure parties are valid
-	// rt.ValidateImmediateCallerType(builtin.CallerTypesSignable...)
-	// toID, err := addr.IDFromAddress(params.To)
-	// if err != nil {
-	// 	rt.Abort(exitcode.ErrIllegalArgument, "receiver must be ID address")
-	// }
+	// Check that the channel creator is capable of signing vouchers.
+	creator := rt.ImmediateCaller()
+	ret, code := rt.Send(creator, builtin.MethodsAccount.PubkeyAddress, &adt.EmptyValue{}, big.Zero())
+	builtin.RequireSuccess(rt, code, "failed to request pubkey address for %v", creator)
+	var signingAddress addr.Address
+	err := ret.Into(&signingAddress)
+	if err != nil {
+		rt.Abort(exitcode.ErrSerialization, "failed to deserialize address %v", ret)
+	}
+	if signingAddress.Protocol() != addr.SECP256K1 && signingAddress.Protocol() != addr.BLS {
+		rt.Abort(exitcode.ErrIllegalArgument, "creator's signing address must use SECP or BLS protocol, was %v", signingAddress.Protocol())
+	}
 
-	// if !toID.PubKeyAddress.Protocol() == addr.SECP256K1 && !toID.PubKeyAddress.Protocol() == addr.BLS {
-	// 	rt.Abort(exitcode.ErrIllegalArgument, "address must use BLS or SECP protocol, got %v", toID.PubKeyAddress.Protocol())
-	// }
+	// Check that target is a canonical ID address.
+	// This is required for consistent caller validation.
+	if params.To.Protocol() != addr.ID {
+		rt.Abort(exitcode.ErrIllegalArgument, "target address must be an ID-address, %v is %v", params.To, params.To.Protocol())
+	}
 
-	var st PaymentChannelActorState
-	rt.State().Transaction(&st, func() interface{} {
-		st.From = rt.ImmediateCaller()
-		st.To = params.To
-		st.LaneStates = make(map[int64]*LaneState)
-		return nil
+	rt.State().Construct(func() vmr.CBORMarshaler {
+		return ConstructState(creator, params.To)
 	})
 	return &adt.EmptyValue{}
 }
@@ -51,10 +53,42 @@ func (pca *PaymentChannelActor) Constructor(rt vmr.Runtime, params *PCAConstruct
 // Payment Channel state operations
 ////////////////////////////////////////////////////////////////////////////////
 
-type PCAUpdateChannelStateParams struct {
+type UpdateChannelStateParams struct {
 	Sv     SignedVoucher
 	Secret []byte
 	Proof  []byte
+}
+
+// A voucher is sent by `From` to `To` off-chain in order to enable
+// `To` to redeem payments on-chain in the future
+type SignedVoucher struct {
+	// TimeLock sets a min epoch before which the voucher cannot be redeemed
+	TimeLock abi.ChainEpoch
+	// (optional) The SecretPreImage is used by `To` to validate
+	SecretPreimage []byte
+	// (optional) Extra can be specified by `From` to add a verification method to the voucher
+	Extra *ModVerifyParams
+	// Specifies which lane the Voucher merges into (will be created if does not exist)
+	Lane int64
+	// Nonce is set by `From` to prevent redemption of stale vouchers on a lane
+	Nonce int64
+	// Amount voucher can be redeemed for
+	Amount big.Int
+	// (optional) MinSettleHeight can extend channel MinSettleHeight if needed
+	MinSettleHeight abi.ChainEpoch
+
+	// (optional) Set of lanes to be merged into `Lane`
+	Merges []Merge
+
+	// Sender's signature over the voucher
+	Signature *acrypto.Signature
+}
+
+// Modular Verification method
+type ModVerifyParams struct {
+	Actor  addr.Address
+	Method abi.MethodNum
+	Data   []byte
 }
 
 type PaymentVerifyParams struct {
@@ -62,15 +96,7 @@ type PaymentVerifyParams struct {
 	Proof []byte
 }
 
-func (st *PaymentVerifyParams) MarshalCBOR(w io.Writer) error {
-	panic("replace with cbor-gen")
-}
-
-func (st *PaymentVerifyParams) UnmarshalCBOR(r io.Reader) error {
-	panic("replace with cbor-gen")
-}
-
-func (pca *PaymentChannelActor) UpdateChannelState(rt vmr.Runtime, params *PCAUpdateChannelStateParams) *adt.EmptyValue {
+func (pca *PaymentChannelActor) UpdateChannelState(rt vmr.Runtime, params *UpdateChannelStateParams) *adt.EmptyValue {
 	var st PaymentChannelActorState
 	rt.State().Readonly(&st)
 
@@ -118,12 +144,13 @@ func (pca *PaymentChannelActor) UpdateChannelState(rt vmr.Runtime, params *PCAUp
 	}
 
 	rt.State().Transaction(&st, func() interface{} {
-		ls, ok := st.LaneStates[sv.Lane]
+		voucherKey := adt.IntKey(sv.Lane).Key()
+		ls, ok := st.LaneStates[voucherKey]
 		// create voucher lane if it does not already exist
 		if !ok {
 			ls = new(LaneState)
 			ls.Redeemed = big.NewInt(0)
-			st.LaneStates[sv.Lane] = ls
+			st.LaneStates[voucherKey] = ls
 		}
 
 		if ls.Nonce > sv.Nonce {
@@ -138,7 +165,7 @@ func (pca *PaymentChannelActor) UpdateChannelState(rt vmr.Runtime, params *PCAUp
 				rt.Abort(exitcode.ErrIllegalArgument, "voucher cannot merge lanes into its own lane")
 			}
 
-			otherls := st.LaneStates[merge.Lane]
+			otherls := st.LaneStates[adt.IntKey(merge.Lane).Key()]
 
 			if otherls.Nonce >= merge.Nonce {
 				rt.Abort(exitcode.ErrIllegalArgument, "merged lane in voucher has outdated nonce, cannot redeem")
@@ -182,7 +209,7 @@ func (pca *PaymentChannelActor) UpdateChannelState(rt vmr.Runtime, params *PCAUp
 	return &adt.EmptyValue{}
 }
 
-func (pca *PaymentChannelActor) Settle(rt vmr.Runtime) *adt.EmptyValue {
+func (pca *PaymentChannelActor) Settle(rt vmr.Runtime, _ *adt.EmptyValue) *adt.EmptyValue {
 	var st PaymentChannelActorState
 	rt.State().Transaction(&st, func() interface{} {
 
@@ -202,7 +229,7 @@ func (pca *PaymentChannelActor) Settle(rt vmr.Runtime) *adt.EmptyValue {
 	return &adt.EmptyValue{}
 }
 
-func (pca *PaymentChannelActor) Collect(rt vmr.Runtime) *adt.EmptyValue {
+func (pca *PaymentChannelActor) Collect(rt vmr.Runtime, _ *adt.EmptyValue) *adt.EmptyValue {
 
 	var st PaymentChannelActorState
 	rt.State().Readonly(&st)
@@ -237,4 +264,16 @@ func (pca *PaymentChannelActor) Collect(rt vmr.Runtime) *adt.EmptyValue {
 		return nil
 	})
 	return &adt.EmptyValue{}
+}
+
+func (sv *SignedVoucher) SigningBytes() ([]byte, error) {
+	osv := *sv
+	osv.Signature = nil
+
+	buf := new(bytes.Buffer)
+	if err := osv.MarshalCBOR(buf); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
 }

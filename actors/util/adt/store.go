@@ -8,7 +8,6 @@ import (
 	cid "github.com/ipfs/go-cid"
 	cbor "github.com/ipfs/go-ipld-cbor"
 
-	abi "github.com/filecoin-project/specs-actors/actors/abi"
 	vmr "github.com/filecoin-project/specs-actors/actors/runtime"
 	exitcode "github.com/filecoin-project/specs-actors/actors/runtime/exitcode"
 )
@@ -58,9 +57,9 @@ func (k AddrKey) Key() string {
 }
 
 // Adapts an epoch as a mapping key.
-type EpochKey abi.ChainEpoch
+type IntKey int64
 
-func (k EpochKey) Key() string {
+func (k IntKey) Key() string {
 	var buf []byte
 	n := binary.PutVarint(buf, int64(k))
 	return string(buf[:n])

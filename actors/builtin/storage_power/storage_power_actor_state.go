@@ -37,7 +37,7 @@ type CronEvent struct {
 }
 
 type AddrKey = adt.AddrKey
-type EpochKey = adt.EpochKey
+type EpochKey = adt.IntKey
 
 func ConstructState(store adt.Store) (*StoragePowerActorState, error) {
 	emptyMap, err := adt.MakeEmptyMap(store)
