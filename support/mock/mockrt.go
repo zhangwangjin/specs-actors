@@ -64,7 +64,8 @@ type Runtime struct {
 	expectVerifyConsensusFault *expectVerifyConsensusFault
 	expectDeleteActor          *address.Address
 
-	logs []string
+	logs       []string
+	gasCharged int64
 }
 
 type expectRandomness struct {
@@ -856,6 +857,12 @@ func (rt *Runtime) ExpectLogsContain(substr string) {
 	rt.failTest("logs contain %d message(s) and do not contain \"%s\"", len(rt.logs), substr)
 }
 
+func (rt *Runtime) ExpectGasCharged(gas int64) {
+	if gas != rt.gasCharged {
+		rt.failTest("expected gas charged: %d, actual gas charged: %d", gas, rt.gasCharged)
+	}
+}
+
 func (rt *Runtime) Call(method interface{}, params interface{}) interface{} {
 	meth := reflect.ValueOf(method)
 	rt.verifyExportedMethodType(meth)
@@ -913,7 +920,9 @@ func (rt *Runtime) failTestNow(msg string, args ...interface{}) {
 	rt.t.FailNow()
 }
 
-func (rt *Runtime) ChargeGas(_ string, _, _ int64) {}
+func (rt *Runtime) ChargeGas(_ string, gas, _ int64) {
+	rt.gasCharged += gas
+}
 
 type ReturnWrapper struct {
 	V runtime.CBORMarshaler
