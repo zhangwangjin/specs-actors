@@ -596,7 +596,7 @@ func TestWindowPost(t *testing.T) {
 				actor.submitWindowPoSt(rt, deadline, partitions, infos, nil)
 			}
 
-			rt.SetEpoch(deadline.Close + 1)
+			rt.SetEpoch(deadline.NextOpen())
 			deadline = actor.deadline(rt)
 		}
 
@@ -615,7 +615,7 @@ func TestWindowPost(t *testing.T) {
 		deadline := actor.deadline(rt)
 
 		// advance to next deadline where we expect the first sectors to appear
-		rt.SetEpoch(deadline.Close + 1)
+		rt.SetEpoch(deadline.NextOpen())
 		deadline = st.DeadlineInfo(rt.Epoch())
 
 		infos, partitions := actor.computePartitions(rt, deadlines, deadline.Index)
@@ -749,7 +749,7 @@ func TestWindowPost(t *testing.T) {
 		// look ahead to next deadline to find a sector not in this deadline
 		deadlines, err := st.LoadDeadlines(rt.AdtStore())
 		require.NoError(t, err)
-		nextDeadline := st.DeadlineInfo(deadline.Close + 1)
+		nextDeadline := st.DeadlineInfo(deadline.NextOpen())
 		nextInfos, _ := actor.computePartitions(rt, deadlines, nextDeadline.Index)
 
 		pwr := miner.PowerForSectors(actor.sectorSize, nextInfos[:1])
@@ -968,7 +968,7 @@ func TestProvingPeriodCron(t *testing.T) {
 		})
 
 		// advance to next deadline where we expect the first sectors to appear
-		rt.SetEpoch(deadline.Close + 1)
+		rt.SetEpoch(deadline.NextOpen())
 		deadline = st.DeadlineInfo(rt.Epoch())
 
 		// Skip to end of proving period, cron detects all sectors as faulty
@@ -1005,7 +1005,7 @@ func TestProvingPeriodCron(t *testing.T) {
 		assert.True(t, set)
 
 		// advance 3 deadlines
-		rt.SetEpoch(deadline.Close + 3*miner.WPoStChallengeWindow)
+		rt.SetEpoch(deadline.NextOpen() + 3*miner.WPoStChallengeWindow)
 		deadline = st.DeadlineInfo(rt.Epoch())
 
 		actor.declareRecoveries(rt, 1, sectorInfoAsBitfield(allSectors[1:]))
@@ -1973,7 +1973,7 @@ func (h *actorHarness) advanceProvingPeriodWithoutFaults(rt *mock.Runtime) {
 			h.submitWindowPoSt(rt, deadline, partitions, infos, nil)
 		}
 
-		rt.SetEpoch(deadline.Close + 1)
+		rt.SetEpoch(deadline.NextOpen())
 		deadline = h.deadline(rt)
 	}
 	// Rewind one epoch to leave the current epoch as the penultimate one in the proving period,
